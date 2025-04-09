@@ -1,0 +1,22 @@
+{
+  "HEADER": {
+    "prefix": "header",
+    "body": [
+      // "#!/usr/bin/env python",
+      "# -*- encoding: utf-8 -*-",
+      "'''",
+      "@File    :   $TM_FILENAME",
+      "@Time    :   $CURRENT_YEAR/$CURRENT_MONTH/$CURRENT_DATE $CURRENT_HOUR:$CURRENT_MINUTE:$CURRENT_SECOND",
+      "@Author  :   bAdblocks ",
+      "@Version :   1.0",
+      "@Contact :   betterWL@hotmail.com",
+      // "@License :   (C)Copyright 2017-2018, Liugroup-NLPR-CASIA",
+      // "@Desc    :   None",
+
+      "'''",
+      "",
+      "# here put the import lib",
+      "$0"
+    ]
+  }
+}
