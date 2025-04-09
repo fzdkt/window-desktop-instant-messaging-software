@@ -8,13 +8,15 @@ import os
 
 class ClientNetwork:
     def __init__(self, host, port, gui):
+
+        self.gui = gui
         self.host = host
         self.port = port
-        self.gui = gui
         self.nickname = "未命名用户"
         self.current_mode = "public"
         self.target_user = None
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket = None
+        # self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         # 连接服务器
         try:
@@ -35,6 +37,63 @@ class ClientNetwork:
         self.receive_thread = threading.Thread(target=self.receive_data, daemon=True)
         self.receive_thread.start()
 
+        self.connect_to_server()
+
+    def connect_to_server(self):
+        """通用连接方法"""
+        try:
+            if self.client_socket:
+                self.client_socket.close()
+
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((self._host, self._port))
+
+            # 重启接收线程
+            if hasattr(self, "receive_thread"):
+                self.receive_thread.join(0.1)
+            self.receive_thread = threading.Thread(
+                target=self.receive_data, daemon=True
+            )
+            self.receive_thread.start()
+
+            self.gui.status_label.setText("状态：已连接")
+            return True
+        except Exception as e:
+            self.gui.append_message_signal.emit(f"[错误] 连接失败: {str(e)}")
+            return False
+
+    def reconnect_to_server(self, new_host, new_port):
+        """重新连接到新服务器"""
+        self._host = new_host
+        self._port = new_port
+
+        # 保存旧socket引用
+        old_socket = self.client_socket
+
+        # 尝试连接新服务器
+        if self.connect_to_server():
+            # 关闭旧连接
+            if old_socket:
+                try:
+                    old_socket.shutdown(socket.SHUT_RDWR)
+                    old_socket.close()
+                except:
+                    pass
+            # 发送用户更新信息
+            self.send_user_update()
+        else:
+            raise ConnectionError("无法连接到新服务器")
+
+    def send_user_update(self):
+        """连接成功后更新用户信息"""
+        update_data = {
+            "type": "user_update",
+            "nickname": self.nickname,
+            "ip": self.host,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.client_socket.send(json.dumps(update_data).encode())
+
     def set_nickname(self):
         nickname, ok = QInputDialog.getText(self.gui, "设置昵称", "请输入昵称:")
         if ok and nickname:
@@ -49,8 +108,12 @@ class ClientNetwork:
             # self.send_system_message({"type": "user_update", "nickname": nickname})
 
     def send_message(self):
-        message = self.gui.message_input.text()
+        message = self.gui.message_input.text().strip()
         if not message:
+            # self.gui.append_message_signal.emit("[系统] 消息内容不能为空！")
+            # self.gui.message_input.clear()
+            self.gui._show_status_message("⚠️ 消息内容不能为空！")  # 使用状态栏提示
+            self.gui.message_input.clear()
             return
 
         message_data = {
@@ -62,41 +125,77 @@ class ClientNetwork:
             "receiver": "all" if self.current_mode == "public" else self.target_user,
         }
         # 本地立即显示逻辑
-        self.show_local_message(message_data)
+        # self.show_local_message(message_data)
 
         self.client_socket.send(json.dumps(message_data).encode())
         self.gui.message_input.clear()
 
     # 立即显示自己发送的消息
     def show_local_message(self, message_data):
-        display_text = f"[我] {message_data['timestamp']}\n{message_data['content']}\n"
+        display_text = f" {message_data['timestamp']}\n{message_data['content']}\n"
         self.gui.messages_display.append(display_text)
 
     def send_file(self):
-        file_path, _ = self.gui.file_dialog.getOpenFileName()
-        if not file_path:
-            return
+        try:
+            file_path, _ = self.gui.file_dialog.getOpenFileName()
+            if not file_path:
+                return
 
-        # 发送文件元数据
-        file_data = {
-            "type": "file",
-            "sender_ip": self.host,
-            "nickname": self.nickname,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "file_name": file_path.split("/")[-1],
-            "file_size": os.path.getsize(file_path),
-            "receiver": "all" if self.current_mode == "public" else self.target_user,
-        }
+            # 发送文件元数据
+            file_data = {
+                "type": "file",
+                "sender_ip": self.host,
+                "nickname": self.nickname,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "file_name": os.path.basename(file_path),
+                "file_size": os.path.getsize(file_path),
+                "receiver": (
+                    "all" if self.current_mode == "public" else self.target_user
+                ),
+            }
 
-        self.client_socket.send(json.dumps(file_data).encode())
+            # 添加结束标记
+            meta_data = json.dumps(file_data) + "<END_OF_JSON>"
+            self.client_socket.send(meta_data.encode())
 
-        # 发送文件内容
-        with open(file_path, "rb") as f:
-            while True:
-                chunk = f.read(1024)
-                if not chunk:
-                    break
-                self.client_socket.send(chunk)
+            # 等待服务器确认
+            ack = self.client_socket.recv(3)  # 接收简单的ACK确认
+            if ack != b"ACK":
+                raise Exception("服务器未确认接收")
+
+            # 发送文件内容（分块发送）
+            with open(file_path, "rb") as f:
+                total_sent = 0
+                while total_sent < file_data["file_size"]:
+                    chunk = f.read(4096)  # 增大块大小到4KB
+                    if not chunk:
+                        break
+                    self.client_socket.sendall(chunk)  # 使用sendall确保完整发送
+                    total_sent += len(chunk)
+                    # 更新发送进度（可选）
+                    progress = int((total_sent / file_data["file_size"]) * 100)
+                    self.gui.append_message_signal.emit(f"[进度] 已发送 {progress}%")
+
+            self.gui.append_message_signal.emit(
+                f"[成功] 文件 {file_data['file_name']} 已发送"
+            )
+        except Exception as e:
+            print(f"文件发送失败: {str(e)}")
+            self.gui.append_message_signal.emit(f"[错误] 文件发送失败: {str(e)}")
+            # 重建连接
+            self.reconnect_server()
+
+    # 重新连接服务器
+    def reconnect_server(self):
+        try:
+            self.client_socket.close()
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((self.host, self.port))
+            self.gui.status_label.setText("状态：已重新连接")
+        except Exception as e:
+            self.gui.append_message_signal.emit(
+                f"[严重错误] 无法重新连接服务器: {str(e)}"
+            )
 
     def receive_data(self):
         while True:
@@ -134,8 +233,8 @@ class ClientNetwork:
         except Exception as e:
             print(f"处理消息错误: {str(e)}")
 
+    # 处理用户列表更新
     def _handle_user_list(self, users):
-        """处理用户列表更新"""
         self.gui.user_list.clear()
         for user in users:
             item = QListWidgetItem(
@@ -143,14 +242,16 @@ class ClientNetwork:
             )
             self.gui.user_list.addItem(item)
 
+    # 处理聊天消息
     def _handle_chat_message(self, message):
-        """处理聊天消息"""
         required_fields = ["sender_ip", "content", "timestamp"]
         if not all(field in message for field in required_fields):
             raise ValueError("消息缺少必要字段")
 
         is_self = message["sender_ip"] == self.host
-        display_name = "我" if is_self else message.get("nickname", "未知用户")
+        display_name = (
+            message["sender_ip"] if is_self else message.get("nickname", "未知用户")
+        )
 
         display_text = (
             f"[{message['timestamp']}] {display_name}({message['sender_ip']})\n"
@@ -190,3 +291,17 @@ class ClientNetwork:
     def handle_file(self, data):
         # 文件处理逻辑
         pass
+
+    # 发送刷新用户列表请求
+    def send_refresh_request(self):
+        request = {
+            "type": "get_user_list",
+            "sender_ip": self.host,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            self.client_socket.send(json.dumps(request).encode())
+            print("[DEBUG] 已发送用户列表刷新请求")
+        except Exception as e:
+            print(f"发送刷新请求失败: {str(e)}")
+            self.gui.append_message_signal.emit("[系统] 刷新用户列表失败")
