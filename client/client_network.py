@@ -39,14 +39,26 @@ class ClientNetwork:
 
         self.connect_to_server()
 
+    # 通用连接方法
     def connect_to_server(self):
-        """通用连接方法"""
         try:
             if self.client_socket:
-                self.client_socket.close()
-
+                # 关闭旧连接
+                try:
+                    self.client_socket.shutdown(socket.SHUT_RDWR)
+                    self.client_socket.close()
+                except:
+                    pass
+            # 创建新连接
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.settimeout(10)
             self.client_socket.connect((self._host, self._port))
+
+            # 发送初始握手包
+            self.client_socket.send(b"HELO")
+            ack = self.client_socket.recv(4)
+            if ack != b"ACK":
+                raise ConnectionError("握手失败")
 
             # 重启接收线程
             if hasattr(self, "receive_thread"):
@@ -115,25 +127,47 @@ class ClientNetwork:
             self.gui._show_status_message("⚠️ 消息内容不能为空！")  # 使用状态栏提示
             self.gui.message_input.clear()
             return
+        if not self.client_socket or not self._is_connected():
+            self.gui.append_message_signal.emit("[系统] 正在尝试重新连接...")
+            self.connect_to_server()
+        try:
 
-        message_data = {
-            "type": "message",
-            "sender_ip": self.host,
-            "nickname": self.nickname,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "content": message,
-            "receiver": "all" if self.current_mode == "public" else self.target_user,
-        }
-        # 本地立即显示逻辑
-        # self.show_local_message(message_data)
+            message_data = {
+                "type": "message",
+                "sender_ip": self.host,
+                "nickname": self.nickname,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "content": message,
+                "receiver": (
+                    "all" if self.current_mode == "public" else self.target_user
+                ),
+            }
+            # 本地立即显示逻辑
+            self.show_local_message(message_data)
 
-        self.client_socket.send(json.dumps(message_data).encode())
+            self.client_socket.send(json.dumps(message_data).encode("utf-8"))
+        except Exception as e:
+            self.gui.append_message_signal.emit(f"[错误] 发送失败: {str(e)}")
+            self.reconnect_server()
         self.gui.message_input.clear()
+
+    # 添加连接状态的判断
+    def _is_connected(self):
+        try:
+            # 发送空数据测试连接状态
+            self.client_socket.send(b"")
+            return True
+        except (OSError, AttributeError):
+            return False
 
     # 立即显示自己发送的消息
     def show_local_message(self, message_data):
-        display_text = f" {message_data['timestamp']}\n{message_data['content']}\n"
-        self.gui.messages_display.append(display_text)
+        display_text = (
+            f"[{message_data['timestamp']}] 我({self.host})\n"
+            f"{message_data['content']}\n"
+            "------------------------"
+        )
+        self.gui.append_message_signal.emit(display_text)
 
     def send_file(self):
         try:
