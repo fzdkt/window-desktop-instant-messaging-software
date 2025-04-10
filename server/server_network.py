@@ -304,6 +304,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
 class EnhancedServerNetwork(ServerNetwork):
     def __init__(self, *args):
+        print(f"服务器已启动在 {args[1]} 端口")
         super().__init__(*args)
         self.web_message_queue = []
         self.web_message_lock = threading.Lock()
